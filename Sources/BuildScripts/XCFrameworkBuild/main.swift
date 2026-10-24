@@ -5,10 +5,9 @@ do {
     try Build.performCommand(options)
 
     // SSL
+    // Warp: OpenSSL (Apache-2.0) only. GnuTLS pulls in gmp, nettle and
+    // hogweed, which are LGPLv3 and force FFmpeg's --enable-version3.
     try BuildOpenSSL().buildALL()
-    try BuildGmp().buildALL()
-    try BuildNettle().buildALL()
-    try BuildGnutls().buildALL()
 
     // libass
     try BuildUnibreak().buildALL()
@@ -17,8 +16,7 @@ do {
     try BuildHarfbuzz().buildALL()
     try BuildASS().buildALL()
 
-    // libsmbclient
-    try BuildSmbclient().buildALL()
+    // libsmbclient: GPL builds only, which Warp never makes.
 
     // libbluray
     try BuildBluray().buildALL()
@@ -607,7 +605,7 @@ private class BuildFFMPEG: BaseBuild {
         //        if platform == .isimulator || platform == .tvsimulator {
         //            arguments.append("--assert-level=1")
         //        }
-        var dependencyLibrary = [Library.gmp, .gnutls, .libfreetype, .libharfbuzz, .libfribidi, .libass, .vulkan, .libshaderc, .lcms2, .libplacebo, .libdav1d, .libuavs3d]
+        var dependencyLibrary = [Library.openssl, .libfreetype, .libharfbuzz, .libfribidi, .libass, .vulkan, .libshaderc, .lcms2, .libplacebo, .libdav1d, .libuavs3d]
         if BaseBuild.options.enableGPL {
             dependencyLibrary += [.libsmbclient]
         }
@@ -647,8 +645,11 @@ private class BuildFFMPEG: BaseBuild {
         "--disable-armv5te", "--disable-armv6", "--disable-armv6t2",
         "--disable-bzlib", "--disable-gray", "--disable-iconv", "--disable-linux-perf",
         "--disable-shared", "--disable-small", "--disable-symver", "--disable-xlib",
-        "--enable-cross-compile", "--enable-libxml2", "--enable-nonfree",
-        "--enable-optimizations", "--enable-pic", "--enable-runtime-cpudetect", "--enable-static", "--enable-thumb", "--enable-version3",
+        // Warp: no --enable-nonfree (nothing nonfree is used, but the flag
+        // alone marks the build "nonfree and unredistributable") and no
+        // --enable-version3, so FFmpeg stays LGPL version 2.1 or later.
+        "--enable-cross-compile", "--enable-libxml2",
+        "--enable-optimizations", "--enable-pic", "--enable-runtime-cpudetect", "--enable-static", "--enable-thumb",
         "--pkg-config-flags=--static",
         // Documentation options:
         "--disable-doc", "--disable-htmlpages", "--disable-manpages", "--disable-podpages", "--disable-txtpages",
