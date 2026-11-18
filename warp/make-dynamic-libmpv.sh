@@ -34,13 +34,14 @@ LIBS=(
 )
 
 # platform  sdk                 os-version   arches
-# arm64 only: the devices are, and so is the Mac that builds and tests Warp
-# (simulators and `swift test`). Add x86_64 to a row for an Intel Mac.
+# Devices and macOS (`swift test` on an Apple Silicon Mac) are arm64 only.
+# The simulators keep x86_64 too: a `generic/platform=… Simulator` build,
+# which Warp's checks use, builds both.
 PLATFORMS=(
   "ios          iphoneos          ios17.5            arm64"
-  "isimulator   iphonesimulator   ios17.5-simulator  arm64"
+  "isimulator   iphonesimulator   ios17.5-simulator  arm64 x86_64"
   "tvos         appletvos         tvos17.5           arm64"
-  "tvsimulator  appletvsimulator  tvos17.5-simulator arm64"
+  "tvsimulator  appletvsimulator  tvos17.5-simulator arm64 x86_64"
   "macos        macosx            macos14.0          arm64"
 )
 
@@ -56,8 +57,14 @@ link_slice() {
   done
   local frameworks=(Foundation CoreFoundation AVFoundation AudioToolbox CoreAudio CoreMedia CoreVideo
                     VideoToolbox Metal QuartzCore IOSurface CoreGraphics CoreText Security)
+  local swift=()
   if [[ $platform == macos ]]; then
     frameworks+=(AppKit IOKit Cocoa OpenGL)
+    # mpv's macOS build has Swift parts (its Cocoa backends).
+    local toolchain
+    toolchain=$(dirname "$(xcrun -f swiftc)")/../lib/swift/macosx
+    swift=(-L "$toolchain" -L "$sysroot/usr/lib/swift" -lswiftCompatibility56 -lswiftCompatibilityConcurrency
+           -Wl,-rpath,/usr/lib/swift)
   else
     frameworks+=(UIKit OpenGLES)
   fi
@@ -68,7 +75,7 @@ link_slice() {
     -install_name @rpath/Libmpv.framework/Libmpv \
     -compatibility_version 1 -current_version "$VERSION" \
     -Wl,-force_load,"$thin" "${args[@]}" \
-    "${flags[@]}" -lc++ -lz -lbz2 -liconv -lxml2 -lresolv -lexpat \
+    "${flags[@]}" ${swift[@]+"${swift[@]}"} -lc++ -lz -lbz2 -liconv -lxml2 -lresolv -lexpat \
     -Wl,-exported_symbol,'_mpv_*' -Wl,-dead_strip \
     -o "$out"
 }
