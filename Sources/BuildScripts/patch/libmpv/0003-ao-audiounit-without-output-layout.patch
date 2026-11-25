@@ -1,0 +1,147 @@
+diff --git a/audio/out/ao_audiounit.m b/audio/out/ao_audiounit.m
+index 8d4eb4d..357c6ff 100644
+--- a/audio/out/ao_audiounit.m
++++ b/audio/out/ao_audiounit.m
+@@ -15,6 +15,8 @@
+  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
++#include <stdlib.h>
++
+ #include "ao.h"
+ #include "internal.h"
+ #include "audio/format.h"
+@@ -101,6 +103,35 @@ static OSStatus render_cb_lpcm(void *ctx, AudioUnitRenderActionFlags *aflags,
+     return noErr;
+ }
+ 
++// Warp: the standard layout for a stream of more than two channels when the
++// output has none to read: 7.1 for seven or more (if the route takes eight),
++// else 5.1. Sets ao->channels to match, in the layout's own order; mpv's
++// remixer places the stream's speakers into it (side and back surrounds
++// stand in for each other). In 7.1 Ls/Rs are the side pair (SL/SR) and
++// Rls/Rrs the rear (BL/BR); 5.1's one surround pair takes either.
++static AudioChannelLayout warp_stream_layout(struct ao *ao, NSInteger maxChannels)
++{
++    static const uint8_t five_one[] = {
++        MP_SPEAKER_ID_FL, MP_SPEAKER_ID_FR, MP_SPEAKER_ID_FC, MP_SPEAKER_ID_LFE,
++        MP_SPEAKER_ID_SL, MP_SPEAKER_ID_SR,
++    };
++    static const uint8_t seven_one[] = {
++        MP_SPEAKER_ID_FL, MP_SPEAKER_ID_FR, MP_SPEAKER_ID_FC, MP_SPEAKER_ID_LFE,
++        MP_SPEAKER_ID_SL, MP_SPEAKER_ID_SR, MP_SPEAKER_ID_BL, MP_SPEAKER_ID_BR,
++    };
++    bool seven = ao->channels.num >= 7 && maxChannels >= 8;
++    const uint8_t *speakers = seven ? seven_one : five_one;
++    struct mp_chmap map = { .num = seven ? 8 : 6 };
++    for (int i = 0; i < map.num; i++)
++        map.speaker[i] = speakers[i];
++    ao->channels = map;
++    // MPEG_5_1_A: L R C LFE Ls Rs. MPEG_7_1_C: L R C LFE Ls Rs Rls Rrs.
++    return (AudioChannelLayout) {
++        .mChannelLayoutTag = seven ? kAudioChannelLayoutTag_MPEG_7_1_C
++                                   : kAudioChannelLayoutTag_MPEG_5_1_A,
++    };
++}
++
+ static bool init_audiounit(struct ao *ao)
+ {
+     AudioStreamBasicDescription asbd;
+@@ -148,22 +179,53 @@ static bool init_audiounit(struct ao *ao)
+ 
+     err = au_get_ary(p->audio_unit, kAudioUnitProperty_AudioChannelLayout, kAudioUnitScope_Output,
+                      0, (void**)&layout, &size);
+-    CHECK_CA_ERROR_L(coreaudio_error_audiounit,
+-                     "unable to retrieve audio unit channel layout");
+-
+-    MP_VERBOSE(ao, "AU channel layout tag: %x (%x)\n", layout->mChannelLayoutTag, layout->mChannelBitmap);
+-
+-    layout = convert_layout(layout, &size);
+-    if (!layout) {
+-        MP_ERR(ao, "unable to convert channel layout to list format\n");
+-        goto coreaudio_error_audiounit;
++    // Warp: with tvOS 26.4's Continuous Audio Connection on, every HDMI
++    // route reports 32 unlabelled channels and the output scope has no
++    // layout to read (-10879): tvOS keeps its own output open and folds to
++    // whatever is plugged in. Play anyway: describe the stream's own 5.1 or
++    // 7.1 on the input scope, as VLC does, and let tvOS map it; stereo when
++    // the stream is stereo or tvOS refuses that.
++    bool input_layout = false;
++    AudioChannelLayout stream_layout = {0};
++    // Warp: WARP_AO_NO_LAYOUT=1 acts as if the layout were refused on a
++    // route offering 8 channels or more, to try this path on a simulator or
++    // a route that has one.
++    if (getenv("WARP_AO_NO_LAYOUT")) {
++        if (err == noErr)
++            talloc_free(layout);
++        layout = NULL;
++        err = kAudioUnitErr_InvalidProperty;
++        maxChannels = MAX(maxChannels, 8);
+     }
++    if (err != noErr) {
++        // au_get_ary has already freed anything it allocated.
++        layout = NULL;
++        if (!af_fmt_is_spdif(ao->format) && ao->channels.num > 2 && maxChannels >= 6) {
++            input_layout = true;
++            stream_layout = warp_stream_layout(ao, maxChannels);
++            MP_WARN(ao, "no audio unit channel layout (%d), describing the stream's %d channels instead\n",
++                    (int)err, (int)ao->channels.num);
++        } else {
++            MP_WARN(ao, "no audio unit channel layout (%d), using stereo output\n", (int)err);
++        }
++    } else {
++        MP_VERBOSE(ao, "AU channel layout tag: %x (%x)\n", layout->mChannelLayoutTag, layout->mChannelBitmap);
+ 
+-    for (UInt32 i = 0; i < layout->mNumberChannelDescriptions; i++) {
+-        MP_VERBOSE(ao, "channel map: %i: %u\n", i, layout->mChannelDescriptions[i].mChannelLabel);
++        layout = convert_layout(layout, &size);
++        if (!layout) {
++            MP_ERR(ao, "unable to convert channel layout to list format\n");
++            goto coreaudio_error_audiounit;
++        }
++
++        for (UInt32 i = 0; i < layout->mNumberChannelDescriptions; i++) {
++            MP_VERBOSE(ao, "channel map: %i: %u\n", i, layout->mChannelDescriptions[i].mChannelLabel);
++        }
+     }
+ 
+-    if (af_fmt_is_spdif(ao->format) || instance.outputNumberOfChannels <= 2) {
++    if (input_layout) {
++        // The layout goes on before the unit is initialized, as VLC sets it.
++        AudioUnitUninitialize(p->audio_unit);
++    } else if (!layout || af_fmt_is_spdif(ao->format) || instance.outputNumberOfChannels <= 2) {
+         ao->channels = (struct mp_chmap)MP_CHMAP_INIT_STEREO;
+         MP_VERBOSE(ao, "using stereo output\n");
+     } else {
+@@ -197,6 +259,31 @@ static bool init_audiounit(struct ao *ao)
+     CHECK_CA_ERROR_L(coreaudio_error_audiounit,
+                      "unable to set render callback on audio unit");
+ 
++    if (input_layout) {
++        err = AudioUnitSetProperty(p->audio_unit, kAudioUnitProperty_AudioChannelLayout,
++                                   kAudioUnitScope_Input, 0, &stream_layout, sizeof(stream_layout));
++        if (err == noErr)
++            err = AudioUnitInitialize(p->audio_unit);
++        if (err == noErr) {
++            MP_VERBOSE(ao, "using the stream's %d channels on the input scope\n", (int)ao->channels.num);
++        } else {
++            MP_WARN(ao, "the stream's channel layout was refused (%d), using stereo output\n", (int)err);
++            AudioUnitUninitialize(p->audio_unit);
++            ao->channels = (struct mp_chmap)MP_CHMAP_INIT_STEREO;
++            stream_layout = (AudioChannelLayout) { .mChannelLayoutTag = kAudioChannelLayoutTag_Stereo };
++            AudioUnitSetProperty(p->audio_unit, kAudioUnitProperty_AudioChannelLayout,
++                                 kAudioUnitScope_Input, 0, &stream_layout, sizeof(stream_layout));
++            ca_fill_asbd(ao, &asbd);
++            err = AudioUnitSetProperty(p->audio_unit, kAudioUnitProperty_StreamFormat,
++                                       kAudioUnitScope_Input, 0, &asbd, sizeof(asbd));
++            CHECK_CA_ERROR_L(coreaudio_error_audiounit,
++                             "unable to set the input format on the audio unit");
++            err = AudioUnitInitialize(p->audio_unit);
++            CHECK_CA_ERROR_L(coreaudio_error_component,
++                             "unable to initialize audio unit");
++        }
++    }
++
+     talloc_free(layout);
+ 
+     return true;
