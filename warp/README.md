@@ -9,6 +9,9 @@ under the LGPL, version 2.1 or later.
 - **`Sources/BuildScripts/XCFrameworkBuild/main.swift`.** FFmpeg is built without `--enable-nonfree` or
   `--enable-version3`, and uses OpenSSL instead of GnuTLS. GnuTLS needs gmp, nettle and hogweed, which are LGPLv3.
   FFmpeg now reports "LGPL version 2.1 or later". libsmbclient is GPL-only, so it's no longer built.
+- **`Sources/BuildScripts/patch/libmpv/0003-ao-audiounit-stereo-without-layout.patch`.** When the audio output has
+  no channel layout to read (an Apple TV on an AV receiver that reports 32 channels), mpv plays stereo instead of
+  turning sound off.
 - **`warp/make-dynamic-libmpv.sh`.** Links mpv, FFmpeg and the libraries they use into one dynamic
   `Libmpv.framework` for each platform. It exports only the `_mpv_*` symbols. The result is
   `dist/dynamic/Libmpv.xcframework`.
